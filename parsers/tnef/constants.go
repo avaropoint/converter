@@ -1,4 +1,4 @@
-// Package tnefparser decodes Microsoft TNEF (Transport Neutral Encapsulation
+// Package tnef decodes Microsoft TNEF (Transport Neutral Encapsulation
 // Format) streams, commonly found as winmail.dat email attachments.
 //
 // It handles the full format including MAPI property streams, embedded
@@ -6,7 +6,7 @@
 // from Outlook's fromhtml1 format (MS-OXRTFEX).
 //
 // Zero external dependencies.
-package tnefparser
+package tnef
 
 import "errors"
 

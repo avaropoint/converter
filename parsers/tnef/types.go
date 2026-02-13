@@ -1,4 +1,4 @@
-package tnefparser
+package tnef
 
 import (
 	"bytes"

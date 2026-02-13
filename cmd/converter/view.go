@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/avaropoint/converter/formats"
-	"github.com/avaropoint/converter/tnefparser"
+	"github.com/avaropoint/converter/parsers/tnef"
 )
 
 func cmdView(path string) {
@@ -28,7 +28,7 @@ func cmdView(path string) {
 	}
 	fmt.Printf("Format:      %s\n", conv.Name())
 	fmt.Println(strings.Repeat("─", 60))
-	msg, err := tnefparser.Decode(data)
+	msg, err := tnef.Decode(data)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error decoding: %v\n", err)
 		os.Exit(1)
@@ -38,28 +38,28 @@ func cmdView(path string) {
 
 func methodStr(m int) string {
 	switch m {
-	case tnefparser.AttachByValue:
+	case tnef.AttachByValue:
 		return "file"
-	case tnefparser.AttachEmbeddedMsg:
+	case tnef.AttachEmbeddedMsg:
 		return "embedded message"
-	case tnefparser.AttachOLE:
+	case tnef.AttachOLE:
 		return "OLE object"
 	default:
 		return fmt.Sprintf("method=%d", m)
 	}
 }
 
-func printMessage(msg *tnefparser.Message, indent string) {
+func printMessage(msg *tnef.Message, indent string) {
 	divider := indent + strings.Repeat("─", 60-len(indent))
 	fields := []struct {
 		label string
 		value string
 	}{
-		{"Subject", msg.GetAttrString(tnefparser.MAPISubject)},
-		{"From", msg.GetAttrString(tnefparser.MAPISenderName)},
-		{"From Email", msg.GetAttrString(tnefparser.MAPISenderEmail)},
-		{"To", msg.GetAttrString(tnefparser.MAPIDisplayTo)},
-		{"CC", msg.GetAttrString(tnefparser.MAPIDisplayCc)},
+		{"Subject", msg.GetAttrString(tnef.MAPISubject)},
+		{"From", msg.GetAttrString(tnef.MAPISenderName)},
+		{"From Email", msg.GetAttrString(tnef.MAPISenderEmail)},
+		{"To", msg.GetAttrString(tnef.MAPIDisplayTo)},
+		{"CC", msg.GetAttrString(tnef.MAPIDisplayCc)},
 	}
 	for _, f := range fields {
 		if f.value != "" {

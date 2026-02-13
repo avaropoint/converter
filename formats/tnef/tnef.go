@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/avaropoint/converter/formats"
-	"github.com/avaropoint/converter/tnefparser"
+	parser "github.com/avaropoint/converter/parsers/tnef"
 )
 
 const tnefSignature = 0x223e9f78
@@ -35,18 +35,18 @@ func (c *converter) Match(data []byte) bool {
 }
 
 func (c *converter) Convert(data []byte) ([]formats.ConvertedFile, error) {
-	msg, err := tnefparser.Decode(data)
+	msg, err := parser.Decode(data)
 	if err != nil {
 		return nil, err
 	}
 	return collectAll(msg, ""), nil
 }
 
-func collectAll(msg *tnefparser.Message, prefix string) []formats.ConvertedFile {
+func collectAll(msg *parser.Message, prefix string) []formats.ConvertedFile {
 	var files []formats.ConvertedFile
 
 	if len(msg.BodyHTML) > 0 || len(msg.BodyRTFHTML) > 0 {
-		msg.ResolveContentIDs(func(att *tnefparser.Attachment) string {
+		msg.ResolveContentIDs(func(att *parser.Attachment) string {
 			if len(att.Data) == 0 {
 				return ""
 			}

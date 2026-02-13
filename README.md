@@ -99,11 +99,14 @@ converter serve 9090
 
 ```
 converter
+├── bin/                 Compiled binaries (gitignored)
 ├── cmd/converter/       CLI + web server
 ├── cmd/inspect/         Low-level TNEF diagnostic tool
+├── deploy/              Seccomp profile + deployment configs
 ├── formats/             Converter interface + registry
 │   └── tnef/            TNEF format implementation
-├── tnefparser/          TNEF binary stream parser
+├── parsers/             Binary stream parsers
+│   └── tnef/            TNEF parser (MAPI, LZFu RTF, de-encapsulation)
 └── web/                 Embedded static assets (go:embed)
     └── static/          HTML, CSS, JS served by the web UI
 ```
@@ -155,12 +158,13 @@ import _ "github.com/avaropoint/converter/formats/myformat"
 ### Build & Test
 
 ```bash
-make build    # Build the binary
+make build    # Build binary to bin/converter
 make test     # Run tests with race detection
 make vet      # Run go vet
 make lint     # Run staticcheck
 make check    # All of the above
 make run      # Build and start web server
+make clean    # Remove bin/ and build artifacts
 ```
 
 ### Project Principles

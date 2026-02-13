@@ -1,11 +1,12 @@
 .PHONY: build test vet lint clean run docker
 
 # Default binary name
-BINARY := converter
+BINARY := bin/converter
 VERSION := $(shell grep 'const version' cmd/converter/main.go | cut -d'"' -f2)
 
 ## build: Compile the binary
 build:
+	@mkdir -p bin
 	go build -ldflags="-s -w" -o $(BINARY) ./cmd/converter
 
 ## test: Run all tests with race detection
@@ -33,7 +34,7 @@ run: build
 
 ## clean: Remove build artifacts
 clean:
-	rm -f $(BINARY)
+	rm -rf bin/
 	rm -rf out/
 
 ## docker: Build Docker image
