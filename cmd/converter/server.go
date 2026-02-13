@@ -179,12 +179,27 @@ func isHexString(s string) bool {
 }
 
 // remoteIP extracts the IP address from r.RemoteAddr, stripping the port.
+// It normalises loopback addresses (::1 ↔ 127.0.0.1) and IPv4-mapped IPv6
+// addresses so that the fingerprint is stable across dual-stack connections.
 func remoteIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr // bare IP without port
+		host = r.RemoteAddr
 	}
-	return host
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	// Normalise loopback: on macOS (and other dual-stack systems) the browser
+	// alternates between ::1 and 127.0.0.1 for localhost connections.
+	if ip.IsLoopback() {
+		return "127.0.0.1"
+	}
+	// Normalise IPv4-mapped IPv6 (e.g. ::ffff:10.0.0.1) to plain IPv4.
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
 }
 
 // clientFingerprint returns a SHA-256 hash of the client's IP and User-Agent,
