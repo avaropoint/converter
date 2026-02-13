@@ -53,6 +53,10 @@ Converter is a file parsing and extraction tool. Its security posture:
   causing out-of-memory crashes.
 - **Graceful shutdown**: The server handles SIGINT/SIGTERM for clean connection
   draining.
+- **Structured logging**: All server events are emitted as JSON via `log/slog`.
+  Every request is logged with method, path, status, duration, and remote address.
+  Rate limit violations are logged at WARN level. No sensitive data (file contents,
+  session payloads) is ever written to logs.
 
 ### What Is Out of Scope
 

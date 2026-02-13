@@ -25,6 +25,8 @@ for adding new formats.
 - **Single binary** — cross-platform, no runtime requirements
 - **Security hardened** — strict CSP, SSRF protection with DNS rebinding defense, rate limiting, filename sanitization
 - **Embedded web assets** — HTML, CSS, JS compiled into the binary via `go:embed`
+- **Structured JSON logging** — `log/slog` with method, path, status, duration on every request
+- **Hardened container** — scratch image, seccomp whitelist, memory/CPU/PID limits, read-only filesystem
 
 ## Quick Start
 
@@ -199,6 +201,19 @@ proxy (nginx, Caddy) that provides:
 - Authentication
 - Additional rate limiting
 - Access logging
+
+### Logging
+
+The web server emits structured JSON logs to stdout via Go's `log/slog`:
+
+```json
+{"time":"2026-02-13T12:00:00Z","level":"INFO","msg":"http request","method":"POST","path":"/api/convert","status":200,"duration_ms":42,"remote":"172.17.0.1:54321"}
+{"time":"2026-02-13T12:00:00Z","level":"INFO","msg":"conversion complete","session":"abc123...","filename":"winmail.dat","input_bytes":196531,"output_files":5}
+```
+
+Logs are compatible with any JSON log aggregator (ELK, Loki, CloudWatch, etc.).
+Rate limit violations are logged at `WARN` level. Startup and shutdown events at
+`INFO`.
 
 ## Free & Open Source
 

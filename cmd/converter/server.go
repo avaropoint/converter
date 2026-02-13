@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -159,7 +159,8 @@ func randomID() string {
 	if _, err := rand.Read(b); err != nil {
 		// crypto/rand failure is unrecoverable -- log and exit cleanly
 		// rather than panicking inside an HTTP handler.
-		log.Fatalf("crypto/rand failed: %v", err)
+		slog.Error("crypto/rand failed", "error", err)
+		os.Exit(1)
 	}
 	return hex.EncodeToString(b)
 }
@@ -180,6 +181,12 @@ func isHexString(s string) bool {
 
 // cmdServe starts the web interface on the given port.
 func cmdServe(port string) {
+	// Structured JSON logger for machine-readable, searchable logs.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
 	store := newSessionStore()
 	limiter := newRateLimiter(10, 2) // 10 burst, 2/sec refill
 
@@ -201,7 +208,7 @@ func cmdServe(port string) {
 	addr := ":" + port
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           securityHeaders(mux),
+		Handler:           requestLogger(securityHeaders(mux)),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -214,30 +221,61 @@ func cmdServe(port string) {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		fmt.Printf("converter v%s web interface\n", version)
-		fmt.Printf("Listening on http://localhost%s\n", addr)
+		slog.Info("server starting",
+			"version", version,
+			"addr", addr,
+			"url", "http://localhost"+addr,
+		)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-stop
-	fmt.Println("\nShutting down...")
+	slog.Info("shutdown initiated", "timeout", "10s")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("shutdown error: %v", err)
+		slog.Error("shutdown error", "error", err)
 	}
 	store.stop()
 	limiter.stop()
-	fmt.Println("Server stopped.")
+	slog.Info("server stopped")
 }
 
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
+
+// responseCapture wraps http.ResponseWriter to capture the status code.
+type responseCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rc *responseCapture) WriteHeader(code int) {
+	rc.status = code
+	rc.ResponseWriter.WriteHeader(code)
+}
+
+// requestLogger logs every HTTP request with method, path, status, and duration.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rc := &responseCapture{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rc, r)
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rc.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
+	})
+}
 
 // securityHeaders wraps a handler with common security headers.
 func securityHeaders(next http.Handler) http.Handler {
@@ -306,6 +344,7 @@ func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
 		// Rate limit conversion requests.
 		if !limiter.allow() {
 			w.Header().Set("Retry-After", "1")
+			slog.Warn("rate limit exceeded", "remote", r.RemoteAddr)
 			jsonError(w, "Too many requests -- try again shortly", http.StatusTooManyRequests)
 			return
 		}
@@ -354,6 +393,13 @@ func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
 		}
 
 		sid := store.create(files)
+
+		slog.Info("conversion complete",
+			"session", sid,
+			"filename", header.Filename,
+			"input_bytes", len(data),
+			"output_files", len(files),
+		)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(convertResponse{

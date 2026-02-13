@@ -5,6 +5,7 @@ converter-*
 
 # Test output
 out/
+/tmp/
 
 # OS files
 .DS_Store
@@ -17,8 +18,14 @@ Thumbs.db
 *.swo
 *~
 
-# No data files should be committed
+# User data — never commit uploaded or test files
 data/
+*.dat
+*.tnef
+*.eml
 
 # Go build cache (usually outside repo, but just in case)
 vendor/
+
+# Docker
+.env
