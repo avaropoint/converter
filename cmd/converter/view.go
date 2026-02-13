@@ -1,3 +1,6 @@
+// view.go implements the CLI "view" command that displays the structure
+// and metadata of a TNEF file.
+
 package main
 
 import (
@@ -10,6 +13,7 @@ import (
 	"github.com/avaropoint/converter/parsers/tnef"
 )
 
+// cmdView decodes a TNEF file and prints its structure to stdout.
 func cmdView(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -36,6 +40,7 @@ func cmdView(path string) {
 	printMessage(msg, "")
 }
 
+// methodStr returns a human-readable label for an attachment method constant.
 func methodStr(m int) string {
 	switch m {
 	case tnef.AttachByValue:
@@ -49,6 +54,7 @@ func methodStr(m int) string {
 	}
 }
 
+// printMessage recursively prints a decoded TNEF message and its attachments.
 func printMessage(msg *tnef.Message, indent string) {
 	divider := indent + strings.Repeat("─", 60-len(indent))
 	fields := []struct {

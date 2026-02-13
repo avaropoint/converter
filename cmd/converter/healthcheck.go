@@ -1,3 +1,6 @@
+// healthcheck.go implements the Docker HEALTHCHECK command that verifies
+// the HTTP server is responding without requiring external tools.
+
 package main
 
 import (

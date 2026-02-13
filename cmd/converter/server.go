@@ -1,3 +1,6 @@
+// server.go implements the HTTP server, session management, rate limiting,
+// HMAC-signed session tokens, and all API route handlers.
+
 package main
 
 import (
@@ -12,7 +15,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,10 +27,6 @@ import (
 	"github.com/avaropoint/converter/formats"
 	"github.com/avaropoint/converter/web"
 )
-
-// ---------------------------------------------------------------------------
-// Session management
-// ---------------------------------------------------------------------------
 
 // session holds the extracted files for a single conversion.
 type session struct {
@@ -51,6 +49,8 @@ type sessionStore struct {
 	done     chan struct{} // closed on shutdown to stop cleanup goroutine
 }
 
+// newSessionStore creates a session store and starts a background goroutine
+// that evicts sessions older than 10 minutes.
 func newSessionStore() *sessionStore {
 	s := &sessionStore{
 		sessions: make(map[string]*session),
@@ -60,6 +60,7 @@ func newSessionStore() *sessionStore {
 	return s
 }
 
+// create stores files under a new random session ID and returns the ID.
 func (s *sessionStore) create(files []extractedFile) string {
 	id := randomID()
 	s.mu.Lock()
@@ -68,6 +69,7 @@ func (s *sessionStore) create(files []extractedFile) string {
 	return id
 }
 
+// get returns the session for the given ID, or nil if not found.
 func (s *sessionStore) get(id string) *session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -97,10 +99,6 @@ func (s *sessionStore) cleanup() {
 // stop signals the cleanup goroutine to exit.
 func (s *sessionStore) stop() { close(s.done) }
 
-// ---------------------------------------------------------------------------
-// Rate limiter (stdlib-only token bucket)
-// ---------------------------------------------------------------------------
-
 // rateLimiter implements a simple token-bucket rate limiter.
 type rateLimiter struct {
 	tokens     int64 // current tokens (atomic)
@@ -109,6 +107,8 @@ type rateLimiter struct {
 	done       chan struct{}
 }
 
+// newRateLimiter creates a token-bucket rate limiter and starts a background
+// goroutine that refills tokens once per second.
 func newRateLimiter(maxTokens, refillRate int64) *rateLimiter {
 	rl := &rateLimiter{
 		tokens:     maxTokens,
@@ -120,6 +120,7 @@ func newRateLimiter(maxTokens, refillRate int64) *rateLimiter {
 	return rl
 }
 
+// refill adds tokens to the bucket once per second up to maxTokens.
 func (rl *rateLimiter) refill() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -151,12 +152,10 @@ func (rl *rateLimiter) allow() bool {
 	}
 }
 
+// stop signals the refill goroutine to exit.
 func (rl *rateLimiter) stop() { close(rl.done) }
 
-// ---------------------------------------------------------------------------
-// Crypto & session tokens
-// ---------------------------------------------------------------------------
-
+// randomID returns a cryptographically random 32-character hex string.
 func randomID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -178,41 +177,24 @@ func isHexString(s string) bool {
 	return len(s) > 0
 }
 
-// remoteIP extracts the IP address from r.RemoteAddr, stripping the port.
-// It normalises loopback addresses (::1 ↔ 127.0.0.1) and IPv4-mapped IPv6
-// addresses so that the fingerprint is stable across dual-stack connections.
-func remoteIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return host
-	}
-	// Normalise loopback: on macOS (and other dual-stack systems) the browser
-	// alternates between ::1 and 127.0.0.1 for localhost connections.
-	if ip.IsLoopback() {
-		return "127.0.0.1"
-	}
-	// Normalise IPv4-mapped IPv6 (e.g. ::ffff:10.0.0.1) to plain IPv4.
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
-	}
-	return ip.String()
-}
-
-// clientFingerprint returns a SHA-256 hash of the client's IP and User-Agent,
-// used to bind sessions to a specific device and network origin.
+// clientFingerprint returns a SHA-256 hash of the client's User-Agent,
+// used to bind sessions to a specific browser/device.
+//
+// Note: the IP address is intentionally excluded. On dual-stack networks
+// (IPv4 + IPv6) and in Docker, the browser may connect via different
+// addresses for different requests (e.g. fetch() vs <a> navigation),
+// which would invalidate the session token and cause spurious 403 errors.
 func clientFingerprint(r *http.Request) string {
-	h := sha256.Sum256([]byte(remoteIP(r) + "|" + r.Header.Get("User-Agent")))
+	ua := r.Header.Get("User-Agent")
+	slog.Debug("fingerprint inputs", "ua", ua, "path", r.URL.Path)
+	h := sha256.Sum256([]byte(ua))
 	return hex.EncodeToString(h[:])
 }
 
 // signToken creates an HMAC-SHA256 signed session token.
 // Format: {32-hex-id}.{64-hex-hmac}
 // The HMAC covers the session ID and the client fingerprint, binding the
-// token to the originating IP + User-Agent combination.
+// token to the originating User-Agent.
 func signToken(id, fingerprint string, key []byte) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(id + "|" + fingerprint))
@@ -220,7 +202,7 @@ func signToken(id, fingerprint string, key []byte) string {
 }
 
 // verifyToken validates an HMAC-signed token against the requesting client's
-// fingerprint. Returns the raw session ID and true if the signature is valid.
+// User-Agent fingerprint. Returns the raw session ID and true if valid.
 func verifyToken(token, fingerprint string, key []byte) (string, bool) {
 	parts := strings.SplitN(token, ".", 2)
 	if len(parts) != 2 {
@@ -251,15 +233,14 @@ func verifyToken(token, fingerprint string, key []byte) (string, bool) {
 	return id, true
 }
 
-// ---------------------------------------------------------------------------
-// Server
-// ---------------------------------------------------------------------------
+// cmdServe starts the web interface on the given port. If basePath is
+// non-empty, all routes are served under that prefix (e.g. "/converter").
+func cmdServe(port, basePath string) {
+	basePath = normalizeBasePath(basePath)
 
-// cmdServe starts the web interface on the given port.
-func cmdServe(port string) {
 	// Structured JSON logger for machine-readable, searchable logs.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
@@ -278,7 +259,8 @@ func cmdServe(port string) {
 	mux := http.NewServeMux()
 
 	// Serve the main page from embedded static files.
-	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/robots.txt", handleRobots)
+	mux.HandleFunc("/", handleIndex(basePath))
 	mux.HandleFunc("/api/info", handleInfo)
 	mux.HandleFunc("/api/convert", handleConvert(store, limiter, hmacKey))
 	mux.HandleFunc("/api/files/", handleFile(store, hmacKey, fileLimiter))
@@ -291,9 +273,20 @@ func cmdServe(port string) {
 	))
 
 	addr := ":" + port
+
+	var handler http.Handler = requestLogger(securityHeaders(mux))
+	if basePath != "" {
+		// Wrap all routes under basePath using StripPrefix so the inner
+		// mux still handles root-relative paths like /api/convert.
+		root := http.NewServeMux()
+		root.HandleFunc("/api/info", handleInfo) // root-level health endpoint for Docker
+		root.Handle(basePath+"/", http.StripPrefix(basePath, handler))
+		handler = root
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           requestLogger(securityHeaders(mux)),
+		Handler:           handler,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -309,7 +302,8 @@ func cmdServe(port string) {
 		slog.Info("server starting",
 			"version", version,
 			"addr", addr,
-			"url", "http://localhost"+addr,
+			"basePath", basePath,
+			"url", "http://localhost"+addr+basePath+"/",
 		)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 			slog.Error("server failed", "error", err)
@@ -332,16 +326,13 @@ func cmdServe(port string) {
 	slog.Info("server stopped")
 }
 
-// ---------------------------------------------------------------------------
-// Middleware
-// ---------------------------------------------------------------------------
-
 // responseCapture wraps http.ResponseWriter to capture the status code.
 type responseCapture struct {
 	http.ResponseWriter
 	status int
 }
 
+// WriteHeader captures the status code before delegating to the underlying writer.
 func (rc *responseCapture) WriteHeader(code int) {
 	rc.status = code
 	rc.ResponseWriter.WriteHeader(code)
@@ -371,6 +362,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("X-DNS-Prefetch-Control", "off")
+		// Prevent search engines from indexing, caching, or snippeting any
+		// response. This is the HTTP-header equivalent of <meta name="robots">
+		// and is respected by all major crawlers.
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -383,27 +378,44 @@ func cacheHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
+// handleRobots serves a restrictive robots.txt that disallows all crawling.
+func handleRobots(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write([]byte("User-agent: *\nDisallow: /\n"))
+}
 
-// handleIndex serves the embedded HTML page.
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
+// handleIndex returns a handler that serves the embedded HTML page, injecting
+// a <base href> tag so all relative URLs resolve correctly under basePath.
+func handleIndex(basePath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'none'; script-src 'self'; style-src 'self'; "+
+				"connect-src 'self'; img-src 'self' data:; base-uri 'self'; "+
+				"form-action 'self'; frame-ancestors 'none'")
+		data, err := web.StaticFS.ReadFile("static/index.html")
+		if err != nil {
+			http.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Inject <base href> for subpath hosting and version query strings
+		// for cache-busting static assets.
+		baseHref := basePath + "/"
+		html := strings.Replace(string(data),
+			"<title>Converter</title>",
+			"<base href=\""+baseHref+"\">\n<title>Converter</title>", 1)
+		html = strings.ReplaceAll(html, "static/css/style.css", "static/css/style.css?v="+version)
+		html = strings.ReplaceAll(html, "static/js/app.js", "static/js/app.js?v="+version)
+
+		w.Write([]byte(html))
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; script-src 'self'; style-src 'self'; "+
-			"connect-src 'self'; img-src 'self' data:; base-uri 'self'; "+
-			"form-action 'self'; frame-ancestors 'none'")
-	data, err := web.StaticFS.ReadFile("static/index.html")
-	if err != nil {
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-	w.Write(data)
 }
 
 // handleInfo returns the server version as JSON.
@@ -489,6 +501,7 @@ func handleConvert(store *sessionStore, limiter *rateLimiter, hmacKey []byte) ht
 		)
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, no-store")
 		json.NewEncoder(w).Encode(convertResponse{
 			SessionToken: token,
 			Files:        files,
@@ -515,7 +528,7 @@ func handleFile(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.
 		}
 		token, name := parts[0], parts[1]
 
-		// Verify HMAC-signed token against client fingerprint (IP + User-Agent).
+		// Verify HMAC-signed token against client User-Agent fingerprint.
 		sid, ok := verifyToken(token, clientFingerprint(r), hmacKey)
 		if !ok {
 			slog.Warn("invalid session token",
@@ -565,7 +578,7 @@ func handleZip(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.H
 
 		token := strings.TrimPrefix(r.URL.Path, "/api/zip/")
 
-		// Verify HMAC-signed token against client fingerprint (IP + User-Agent).
+		// Verify HMAC-signed token against client User-Agent fingerprint.
 		sid, ok := verifyToken(token, clientFingerprint(r), hmacKey)
 		if !ok {
 			slog.Warn("invalid session token",
@@ -585,6 +598,7 @@ func handleZip(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.H
 		// Set headers before streaming -- cannot change after first write.
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="converted_output.zip"`)
+		w.Header().Set("Cache-Control", "private, no-store")
 
 		// Stream zip directly to the response writer (no buffering).
 		zw := zip.NewWriter(w)
@@ -601,16 +615,14 @@ func handleZip(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.H
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
+// jsonError writes a JSON error response with the given message and HTTP status code.
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// guessType returns a short type category string based on file extension.
 func guessType(name string) string {
 	lower := strings.ToLower(name)
 	switch {
@@ -637,6 +649,7 @@ func guessType(name string) string {
 	}
 }
 
+// contentType maps a type category from guessType to a MIME content type.
 func contentType(name, fileType string) string {
 	switch fileType {
 	case "html":
@@ -654,6 +667,7 @@ func contentType(name, fileType string) string {
 	}
 }
 
+// imageMIME returns the MIME type for an image file based on its extension.
 func imageMIME(name string) string {
 	lower := strings.ToLower(name)
 	switch {
@@ -682,4 +696,17 @@ func safeDisposition(name string) string {
 		return r
 	}, name)
 	return fmt.Sprintf(`inline; filename="%s"`, safe)
+}
+
+// normalizeBasePath ensures basePath has a leading slash and no trailing
+// slash. An empty string or "/" both mean root (no prefix needed).
+func normalizeBasePath(s string) string {
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		return ""
+	}
+	if s[0] != '/' {
+		s = "/" + s
+	}
+	return s
 }

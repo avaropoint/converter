@@ -1,3 +1,5 @@
+// Inspect is a low-level diagnostic tool that dumps the raw TNEF attribute
+// and MAPI property structure of a winmail.dat file.
 package main
 
 import (
@@ -6,6 +8,7 @@ import (
 	"os"
 )
 
+// tnefSig is the TNEF file format magic number.
 const tnefSig = 0x223e9f78
 
 func main() {
@@ -58,6 +61,7 @@ func main() {
 	}
 }
 
+// dumpMAPI parses and prints all MAPI properties in a raw property stream.
 func dumpMAPI(data []byte, ind string) {
 	if len(data) < 4 {
 		return
@@ -149,6 +153,7 @@ func dumpMAPI(data []byte, ind string) {
 	}
 }
 
+// fSize returns the fixed byte size of a MAPI property type, or -1 for variable-length.
 func fSize(t int) int {
 	switch t {
 	case 0x0002, 0x000B:
@@ -166,8 +171,10 @@ func fSize(t int) int {
 	}
 }
 
+// p4 returns the padding needed to align n to a 4-byte boundary.
 func p4(n int) int { return (4 - n%4) % 4 }
 
+// noNull strips null bytes from a string.
 func noNull(s string) string {
 	o := make([]byte, 0, len(s))
 	for i := range s {
@@ -178,6 +185,7 @@ func noNull(s string) string {
 	return string(o)
 }
 
+// aName returns the symbolic name of a TNEF attribute ID.
 func aName(id uint16) string {
 	m := map[uint16]string{
 		0x8005: "attDateSent", 0x8006: "attDateRecd", 0x8008: "attMessageClass",
@@ -194,6 +202,7 @@ func aName(id uint16) string {
 	return ""
 }
 
+// pName returns the symbolic name of a MAPI property ID.
 func pName(pid int) string {
 	m := map[int]string{
 		0x001A: "PR_MESSAGE_CLASS", 0x0037: "PR_SUBJECT", 0x003D: "PR_SUBJECT_PREFIX",
@@ -221,6 +230,7 @@ func pName(pid int) string {
 	return ""
 }
 
+// tName returns the symbolic name of a MAPI property type.
 func tName(t int) string {
 	m := map[int]string{
 		0x0002: "PT_SHORT", 0x0003: "PT_LONG", 0x000B: "PT_BOOLEAN",

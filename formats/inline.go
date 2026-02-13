@@ -1,3 +1,7 @@
+// inline.go fetches external images referenced in HTML and converts them
+// to inline data URIs. All network access goes through an SSRF-safe HTTP
+// client that blocks private, loopback, and link-local addresses.
+
 package formats
 
 import (
@@ -13,6 +17,7 @@ import (
 	"time"
 )
 
+// imgSrcRe matches <img src="..."> attributes for URL replacement.
 var imgSrcRe = regexp.MustCompile(`(<img\b[^>]*?\bsrc=")([^"]+)(")`)
 
 // ssrfSafeDialer returns a DialContext that resolves DNS and checks every
@@ -69,7 +74,7 @@ var inlineClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
 		DialContext:           ssrfSafeDialer(),
-		TLSHandshakeTimeout:  5 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 5 * time.Second,
 		MaxIdleConns:          10,
 		MaxIdleConnsPerHost:   2,
@@ -142,6 +147,8 @@ func InlineExternalImages(html []byte, cache map[string]string) []byte {
 	})
 }
 
+// fetchImage downloads an image from rawURL and returns the bytes and content type.
+// Returns empty results (without error) for non-image or blocked URLs.
 func fetchImage(rawURL string) ([]byte, string, error) {
 	// Basic URL validation.
 	parsed, err := url.Parse(rawURL)
@@ -203,6 +210,7 @@ func isBlockedIP(ip net.IP) bool {
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
+// imageContentType normalises a Content-Type header to a standard image MIME type.
 func imageContentType(ct string) string {
 	ct = strings.ToLower(ct)
 	switch {

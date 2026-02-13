@@ -1,3 +1,6 @@
+// types.go defines the core data structures for decoded TNEF messages,
+// attachments, and MAPI properties.
+
 package tnef
 
 import (
@@ -90,6 +93,7 @@ func (m *Message) ResolveContentIDs(mapper func(att *Attachment) string) {
 	m.BodyRTFHTML = replaceCIDs(m.BodyRTFHTML, cidMap)
 }
 
+// replaceCIDs substitutes all cid: references in html with the mapped values.
 func replaceCIDs(html []byte, cidMap map[string]string) []byte {
 	if len(html) == 0 {
 		return html

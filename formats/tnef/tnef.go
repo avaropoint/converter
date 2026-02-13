@@ -42,6 +42,8 @@ func (c *converter) Convert(data []byte) ([]formats.ConvertedFile, error) {
 	return collectAll(msg, ""), nil
 }
 
+// collectAll recursively extracts all bodies and attachments from a decoded
+// TNEF message, resolving content-IDs and inlining external images.
 func collectAll(msg *parser.Message, prefix string) []formats.ConvertedFile {
 	var files []formats.ConvertedFile
 
@@ -115,6 +117,7 @@ func collectAll(msg *parser.Message, prefix string) []formats.ConvertedFile {
 	return files
 }
 
+// prefixed prepends a prefix to a filename with an underscore separator.
 func prefixed(prefix, name string) string {
 	if prefix != "" {
 		return prefix + "_" + name

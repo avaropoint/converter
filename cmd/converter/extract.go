@@ -1,3 +1,6 @@
+// extract.go provides the CLI conversion commands (extract, body, dump)
+// that detect the input format, convert the file, and write results.
+
 package main
 
 import (
@@ -8,6 +11,8 @@ import (
 	"github.com/avaropoint/converter/formats"
 )
 
+// convertFile reads a file, auto-detects its format, and returns the
+// converted output files. Exits on error.
 func convertFile(path string) []formats.ConvertedFile {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -27,6 +32,7 @@ func convertFile(path string) []formats.ConvertedFile {
 	return files
 }
 
+// writeConvertedFiles writes each converted file to the given output directory.
 func writeConvertedFiles(files []formats.ConvertedFile, outDir string) {
 	if len(files) == 0 {
 		fmt.Println("No content to extract.")
@@ -39,6 +45,7 @@ func writeConvertedFiles(files []formats.ConvertedFile, outDir string) {
 	}
 }
 
+// cmdExtract converts a file and writes only the attachment outputs to outDir.
 func cmdExtract(path, outDir string) {
 	files := convertFile(path)
 	var filtered []formats.ConvertedFile
@@ -50,6 +57,7 @@ func cmdExtract(path, outDir string) {
 	writeConvertedFiles(filtered, outDir)
 }
 
+// cmdBody converts a file and writes only the message body outputs to outDir.
 func cmdBody(path, outDir string) {
 	files := convertFile(path)
 	var filtered []formats.ConvertedFile
@@ -61,6 +69,7 @@ func cmdBody(path, outDir string) {
 	writeConvertedFiles(filtered, outDir)
 }
 
+// cmdDump converts a file and writes all extracted outputs to outDir.
 func cmdDump(path, outDir string) {
 	files := convertFile(path)
 	writeConvertedFiles(files, outDir)

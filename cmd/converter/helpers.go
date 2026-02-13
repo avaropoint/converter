@@ -1,3 +1,5 @@
+// helpers.go provides shared utility functions for the CLI commands.
+
 package main
 
 import (
@@ -7,6 +9,7 @@ import (
 	"strings"
 )
 
+// humanSize formats a byte count as a human-readable string (e.g. "1.2 KB").
 func humanSize(b int) string {
 	const unit = 1024
 	if b < unit {

@@ -1,3 +1,8 @@
+// rtf.go decompresses LZFu-compressed RTF streams (PR_RTF_COMPRESSED)
+// per the MS-OXRTFCP specification.
+//
+// Reference: https://docs.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxrtfcp
+
 package tnef
 
 import (
@@ -5,11 +10,6 @@ import (
 	"errors"
 	"hash/crc32"
 )
-
-// LZFu decompression for Microsoft PR_RTF_COMPRESSED (MS-OXRTFCP).
-//
-// Reference: [MS-OXRTFCP] Rich Text Format (RTF) Compression Algorithm
-// https://docs.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxrtfcp
 
 // Compressed RTF header signatures.
 const (

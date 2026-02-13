@@ -1,3 +1,6 @@
+// deencapsulate.go extracts original HTML from Outlook's \fromhtml1 RTF
+// encapsulation format (MS-OXRTFEX).
+
 package tnef
 
 import (

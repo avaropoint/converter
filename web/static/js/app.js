@@ -12,9 +12,11 @@
   const downloadAll = document.getElementById('downloadAll');
   const resetBtn = document.getElementById('resetBtn');
   const versionLabel = document.getElementById('versionLabel');
+  const successEl = document.getElementById('successState');
+  const formatsBadge = document.querySelector('.formats-badge');
 
   // Fetch version from server and display in footer
-  fetch('/api/info')
+  fetch('api/info')
     .then(function (r) { return r.json(); })
     .then(function (data) {
       if (data.version) {
@@ -65,9 +67,10 @@
   // Reset
   resetBtn.addEventListener('click', function () {
     resultsEl.style.display = 'none';
+    successEl.style.display = 'none';
     resetBtn.style.display = 'none';
     dropzone.style.display = '';
-    document.querySelector('.formats-badge').style.display = '';
+    formatsBadge.style.display = '';
     statusEl.textContent = '';
     fileInput.value = '';
   });
@@ -86,7 +89,7 @@
     var form = new FormData();
     form.append('file', file);
 
-    fetch('/api/convert', { method: 'POST', body: form })
+    fetch('api/convert', { method: 'POST', body: form })
       .then(function (resp) {
         return resp.json().then(function (data) {
           return { ok: resp.ok, data: data };
@@ -100,13 +103,25 @@
         }
         statusEl.textContent = '';
         dropzone.style.display = 'none';
-        document.querySelector('.formats-badge').style.display = 'none';
-        showResults(result.data);
+        formatsBadge.style.display = 'none';
+        showSuccess(result.data);
       })
       .catch(function () {
         statusEl.className = 'status error';
         statusEl.textContent = 'Connection error';
       });
+  }
+
+  /**
+   * Show a brief success animation, then render the file list.
+   * @param {Object} data - Response from /api/convert
+   */
+  function showSuccess(data) {
+    successEl.style.display = 'flex';
+    setTimeout(function () {
+      successEl.style.display = 'none';
+      showResults(data);
+    }, 700);
   }
 
   /**
@@ -118,12 +133,13 @@
     var files = data.files;
 
     fileCount.textContent = files.length;
-    downloadAll.href = '/api/zip/' + sid;
+    downloadAll.href = 'api/zip/' + sid;
     fileListEl.innerHTML = '';
 
-    files.forEach(function (f) {
+    files.forEach(function (f, i) {
       var li = document.createElement('li');
-      var fileUrl = '/api/files/' + sid + '/' + encodeURIComponent(f.name);
+      li.style.animationDelay = (i * 50) + 'ms';
+      var fileUrl = 'api/files/' + sid + '/' + encodeURIComponent(f.name);
 
       li.innerHTML =
         '<div class="file-icon ' + escAttr(f.type) + '">' +

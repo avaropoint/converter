@@ -1,7 +1,11 @@
+// mapi.go decodes MAPI property streams embedded within TNEF attributes.
+
 package tnef
 
 import "encoding/binary"
 
+// decodeMAPI parses a raw MAPI property stream into a slice of MAPIAttr,
+// handling fixed-size, variable-length, multi-valued, and named properties.
 func decodeMAPI(data []byte) []MAPIAttr {
 	if len(data) < 4 {
 		return nil
@@ -93,6 +97,8 @@ func decodeMAPI(data []byte) []MAPIAttr {
 	return attrs
 }
 
+// fixedPropSize returns the byte size for a fixed-width MAPI property type,
+// or -1 for variable-length types that carry an explicit length prefix.
 func fixedPropSize(pt int) int {
 	switch pt {
 	case 0x0002, 0x000B:
@@ -110,6 +116,7 @@ func fixedPropSize(pt int) int {
 	}
 }
 
+// padTo4 returns the number of padding bytes needed to align n to a 4-byte boundary.
 func padTo4(n int) int {
 	return (4 - n%4) % 4
 }

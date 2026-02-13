@@ -1,3 +1,6 @@
+// decoder.go implements the top-level TNEF stream parser, walking the
+// binary envelope to extract message attributes and attachments.
+
 package tnef
 
 import (
@@ -72,6 +75,8 @@ func Decode(data []byte) (*Message, error) {
 	return msg, nil
 }
 
+// parseAttachProps decodes the MAPI properties for a single attachment,
+// populating filename, MIME type, content-ID, method, and embedded data.
 func parseAttachProps(att *Attachment, data []byte) {
 	attrs := decodeMAPI(data)
 	var obj []byte
@@ -102,6 +107,8 @@ func parseAttachProps(att *Attachment, data []byte) {
 	}
 }
 
+// resolveNested attempts to decode obj as a nested TNEF message, trying
+// with and without the 16-byte IID prefix that some implementations add.
 func resolveNested(att *Attachment, obj []byte) {
 	// Try with 16-byte IID prefix first.
 	if len(obj) > 20 {
@@ -125,6 +132,7 @@ func resolveNested(att *Attachment, obj []byte) {
 	att.Data = obj
 }
 
+// cleanStr strips null bytes and leading/trailing whitespace from s.
 func cleanStr(s string) string {
 	return strings.TrimSpace(strings.ReplaceAll(s, "\x00", ""))
 }

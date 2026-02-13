@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+<meta name="color-scheme" content="light dark">
 <title>Converter</title>
-<link rel="stylesheet" href="/static/css/style.css">
+<link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
 
@@ -34,6 +36,13 @@
 
   <div class="status" id="status"></div>
 
+  <div class="success-state" id="successState">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <p>Done — extracted your files</p>
+  </div>
+
   <div class="results" id="results" style="display:none">
     <div class="results-header">
       <h2>Extracted <span class="file-count" id="fileCount">0</span></h2>
@@ -54,6 +63,6 @@
   <span>Files are processed in memory and auto-deleted after 10 min</span>
 </footer>
 
-<script src="/static/js/app.js"></script>
+<script src="static/js/app.js"></script>
 </body>
 </html>
