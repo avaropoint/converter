@@ -1,0 +1,13 @@
+# Converter supports multi-arch builds. Build with:
+#   docker compose build
+#   docker compose up
+
+services:
+  converter:
+    build: .
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
