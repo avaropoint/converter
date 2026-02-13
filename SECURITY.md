@@ -27,8 +27,8 @@ Converter is a file parsing and extraction tool. Its security posture:
 - **XSS in extracted HTML**: Extracted HTML files are served with a strict
   Content-Security-Policy (`default-src 'none'; style-src 'unsafe-inline'; img-src data:`)
   that blocks all script execution. The main web UI page uses
-  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:`
-  — no inline scripts or styles are permitted.
+  `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:`
+  — no inline scripts, no styles, and all source types must be explicitly allowed.
 - **Static asset integrity**: Web UI assets (HTML, CSS, JS) are compiled into
   the binary via `go:embed` — no filesystem access is needed at runtime, and
   the assets cannot be tampered with after build.
@@ -36,12 +36,19 @@ Converter is a file parsing and extraction tool. Its security posture:
   validates resolved IP addresses before connecting, preventing DNS rebinding
   attacks. Private, loopback, link-local, and cloud metadata IP ranges are
   blocked. Redirects are validated at each hop.
-- **Rate limiting**: Upload endpoint (`/api/convert`) is rate-limited to prevent
-  resource exhaustion from concurrent CPU/memory-intensive conversions.
+- **Rate limiting**: Upload endpoint (`/api/convert`) and file retrieval
+  endpoints (`/api/files/`, `/api/zip/`) each have independent token-bucket
+  rate limiters to prevent resource exhaustion and enumeration attempts.
 - **Header injection**: Filenames from converted files are sanitized to remove
   control characters and path separators before use in HTTP headers.
 - **Upload abuse**: 50 MB upload limit enforced via `MaxBytesReader`.
-- **Session enumeration**: 128-bit cryptographically random session IDs.
+- **Session token security**: Sessions are protected by three layers:
+  1. **128-bit cryptographic random IDs** — computationally infeasible to guess
+  2. **HMAC-SHA256 signed tokens** — server-verified, unforgeable without the
+     256-bit ephemeral key generated at startup
+  3. **Client fingerprint binding** — HMAC covers `SHA-256(client_ip | User-Agent)`,
+     tying each token to the originating device, browser, and network; tokens
+     are rejected (403 Forbidden) when used from a different IP or User-Agent
 - **Clickjacking**: `X-Frame-Options: DENY` and `frame-ancestors 'none'`.
 - **MIME sniffing**: `X-Content-Type-Options: nosniff` on all responses.
 - **Referrer leakage**: `Referrer-Policy: no-referrer` on all responses.

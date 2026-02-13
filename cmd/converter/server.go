@@ -3,13 +3,16 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -151,7 +154,7 @@ func (rl *rateLimiter) allow() bool {
 func (rl *rateLimiter) stop() { close(rl.done) }
 
 // ---------------------------------------------------------------------------
-// Crypto
+// Crypto & session tokens
 // ---------------------------------------------------------------------------
 
 func randomID() string {
@@ -175,6 +178,64 @@ func isHexString(s string) bool {
 	return len(s) > 0
 }
 
+// remoteIP extracts the IP address from r.RemoteAddr, stripping the port.
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr // bare IP without port
+	}
+	return host
+}
+
+// clientFingerprint returns a SHA-256 hash of the client's IP and User-Agent,
+// used to bind sessions to a specific device and network origin.
+func clientFingerprint(r *http.Request) string {
+	h := sha256.Sum256([]byte(remoteIP(r) + "|" + r.Header.Get("User-Agent")))
+	return hex.EncodeToString(h[:])
+}
+
+// signToken creates an HMAC-SHA256 signed session token.
+// Format: {32-hex-id}.{64-hex-hmac}
+// The HMAC covers the session ID and the client fingerprint, binding the
+// token to the originating IP + User-Agent combination.
+func signToken(id, fingerprint string, key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id + "|" + fingerprint))
+	return id + "." + hex.EncodeToString(mac.Sum(nil))
+}
+
+// verifyToken validates an HMAC-signed token against the requesting client's
+// fingerprint. Returns the raw session ID and true if the signature is valid.
+func verifyToken(token, fingerprint string, key []byte) (string, bool) {
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		return "", false
+	}
+	id, sig := parts[0], parts[1]
+
+	if len(id) != 32 || !isHexString(id) {
+		return "", false
+	}
+	if len(sig) != 64 || !isHexString(sig) {
+		return "", false
+	}
+
+	// Recompute expected HMAC.
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id + "|" + fingerprint))
+	expected := mac.Sum(nil)
+
+	actual, err := hex.DecodeString(sig)
+	if err != nil {
+		return "", false
+	}
+
+	if !hmac.Equal(expected, actual) {
+		return "", false
+	}
+	return id, true
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -188,16 +249,25 @@ func cmdServe(port string) {
 	slog.SetDefault(logger)
 
 	store := newSessionStore()
-	limiter := newRateLimiter(10, 2) // 10 burst, 2/sec refill
+	limiter := newRateLimiter(10, 2)      // 10 burst, 2/sec refill (convert)
+	fileLimiter := newRateLimiter(30, 10) // 30 burst, 10/sec refill (file access)
+
+	// Generate per-instance HMAC key for session token signing.
+	// Ephemeral: all sessions are invalidated on server restart.
+	hmacKey := make([]byte, 32)
+	if _, err := rand.Read(hmacKey); err != nil {
+		slog.Error("failed to generate HMAC key", "error", err)
+		os.Exit(1)
+	}
 
 	mux := http.NewServeMux()
 
 	// Serve the main page from embedded static files.
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/info", handleInfo)
-	mux.HandleFunc("/api/convert", handleConvert(store, limiter))
-	mux.HandleFunc("/api/files/", handleFile(store))
-	mux.HandleFunc("/api/zip/", handleZip(store))
+	mux.HandleFunc("/api/convert", handleConvert(store, limiter, hmacKey))
+	mux.HandleFunc("/api/files/", handleFile(store, hmacKey, fileLimiter))
+	mux.HandleFunc("/api/zip/", handleZip(store, hmacKey, fileLimiter))
 
 	// Serve embedded static assets (CSS, JS) under /static/ with cache headers.
 	staticContent, _ := fs.Sub(web.StaticFS, "static")
@@ -243,6 +313,7 @@ func cmdServe(port string) {
 	}
 	store.stop()
 	limiter.stop()
+	fileLimiter.stop()
 	slog.Info("server stopped")
 }
 
@@ -309,9 +380,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self'; style-src 'self'; "+
-			"img-src 'self' data:; base-uri 'self'; form-action 'self'; "+
-			"object-src 'none'; frame-ancestors 'none'")
+		"default-src 'none'; script-src 'self'; style-src 'self'; "+
+			"connect-src 'self'; img-src 'self' data:; base-uri 'self'; "+
+			"form-action 'self'; frame-ancestors 'none'")
 	data, err := web.StaticFS.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -329,12 +400,12 @@ func handleInfo(w http.ResponseWriter, r *http.Request) {
 
 // convertResponse is the JSON returned after a successful conversion.
 type convertResponse struct {
-	SessionID string          `json:"sessionId"`
-	Files     []extractedFile `json:"files"`
+	SessionToken string          `json:"sessionToken"`
+	Files        []extractedFile `json:"files"`
 }
 
 // handleConvert processes an uploaded file, auto-detecting its format.
-func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
+func handleConvert(store *sessionStore, limiter *rateLimiter, hmacKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -393,6 +464,7 @@ func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
 		}
 
 		sid := store.create(files)
+		token := signToken(sid, clientFingerprint(r), hmacKey)
 
 		slog.Info("conversion complete",
 			"session", sid,
@@ -403,26 +475,39 @@ func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(convertResponse{
-			SessionID: sid,
-			Files:     files,
+			SessionToken: token,
+			Files:        files,
 		})
 	}
 }
 
-// handleFile serves a single extracted file by session ID and filename.
-func handleFile(store *sessionStore) http.HandlerFunc {
+// handleFile serves a single extracted file by session token and filename.
+func handleFile(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Path: /api/files/{sessionID}/{filename}
+		// Rate limit file access to slow enumeration attempts.
+		if !limiter.allow() {
+			w.Header().Set("Retry-After", "1")
+			slog.Warn("file rate limit exceeded", "remote", r.RemoteAddr)
+			jsonError(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
+
+		// Path: /api/files/{token}/{filename}
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/files/"), "/", 2)
 		if len(parts) != 2 {
 			http.NotFound(w, r)
 			return
 		}
-		sid, name := parts[0], parts[1]
+		token, name := parts[0], parts[1]
 
-		// Validate session ID format (must be 32 hex chars).
-		if len(sid) != 32 || !isHexString(sid) {
-			http.NotFound(w, r)
+		// Verify HMAC-signed token against client fingerprint (IP + User-Agent).
+		sid, ok := verifyToken(token, clientFingerprint(r), hmacKey)
+		if !ok {
+			slog.Warn("invalid session token",
+				"remote", r.RemoteAddr,
+				"path", r.URL.Path,
+			)
+			jsonError(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
@@ -453,13 +538,26 @@ func handleFile(store *sessionStore) http.HandlerFunc {
 }
 
 // handleZip streams all extracted files as a zip archive directly to the client.
-func handleZip(store *sessionStore) http.HandlerFunc {
+func handleZip(store *sessionStore, hmacKey []byte, limiter *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sid := strings.TrimPrefix(r.URL.Path, "/api/zip/")
+		// Rate limit zip downloads.
+		if !limiter.allow() {
+			w.Header().Set("Retry-After", "1")
+			slog.Warn("zip rate limit exceeded", "remote", r.RemoteAddr)
+			jsonError(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
 
-		// Validate session ID format.
-		if len(sid) != 32 || !isHexString(sid) {
-			http.NotFound(w, r)
+		token := strings.TrimPrefix(r.URL.Path, "/api/zip/")
+
+		// Verify HMAC-signed token against client fingerprint (IP + User-Agent).
+		sid, ok := verifyToken(token, clientFingerprint(r), hmacKey)
+		if !ok {
+			slog.Warn("invalid session token",
+				"remote", r.RemoteAddr,
+				"path", r.URL.Path,
+			)
+			jsonError(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 

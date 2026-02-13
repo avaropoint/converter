@@ -114,7 +114,7 @@
    * @param {Object} data - Response from /api/convert
    */
   function showResults(data) {
-    var sid = data.sessionId;
+    var sid = data.sessionToken;
     var files = data.files;
 
     fileCount.textContent = files.length;

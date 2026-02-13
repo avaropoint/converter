@@ -23,7 +23,7 @@ for adding new formats.
 - **CLI with multiple commands** — view, extract, body, dump, serve
 - **Zero external dependencies** — Go standard library only
 - **Single binary** — cross-platform, no runtime requirements
-- **Security hardened** — strict CSP, SSRF protection with DNS rebinding defense, rate limiting, filename sanitization
+- **Security hardened** — HMAC-signed session tokens, IP + device fingerprint binding, SSRF protection with DNS rebinding defense, rate limiting, strict CSP
 - **Embedded web assets** — HTML, CSS, JS compiled into the binary via `go:embed`
 - **Structured JSON logging** — `log/slog` with method, path, status, duration on every request
 - **Hardened container** — scratch image, seccomp whitelist, memory/CPU/PID limits, read-only filesystem
@@ -186,7 +186,9 @@ Key protections:
 | SSRF via image URLs | DNS rebinding-safe custom dialer, redirect validation, private IP blocks |
 | Header injection | Control characters stripped from filenames |
 | Upload abuse | 50 MB limit via `MaxBytesReader` + rate limiting |
-| Session enumeration | 128-bit `crypto/rand` session IDs |
+| Session hijacking | HMAC-SHA256 signed tokens bound to client IP + User-Agent |
+| Session enumeration | 128-bit `crypto/rand` session IDs + HMAC signature verification |
+| File endpoint abuse | Separate rate limiter on `/api/files/` and `/api/zip/` |
 | Slowloris / connection exhaustion | Read/Write/Idle timeouts + graceful shutdown |
 | Clickjacking | `X-Frame-Options: DENY` + `frame-ancestors 'none'` |
 | MIME sniffing | `X-Content-Type-Options: nosniff` |
@@ -213,11 +215,28 @@ The web server emits structured JSON logs to stdout via Go's `log/slog`:
 ```json
 {"time":"2026-02-13T12:00:00Z","level":"INFO","msg":"http request","method":"POST","path":"/api/convert","status":200,"duration_ms":42,"remote":"172.17.0.1:54321"}
 {"time":"2026-02-13T12:00:00Z","level":"INFO","msg":"conversion complete","session":"abc123...","filename":"winmail.dat","input_bytes":196531,"output_files":5}
+{"time":"2026-02-13T12:00:00Z","level":"WARN","msg":"invalid session token","remote":"10.0.0.5:12345","path":"/api/files/deadbeef.../body.html"}
 ```
 
 Logs are compatible with any JSON log aggregator (ELK, Loki, CloudWatch, etc.).
-Rate limit violations are logged at `WARN` level. Startup and shutdown events at
-`INFO`.
+Rate limit violations and invalid token attempts are logged at `WARN` level.
+Startup and shutdown events at `INFO`.
+
+### Session Security
+
+Every conversion creates an **HMAC-SHA256 signed session token** that binds the
+result to the originating client:
+
+- **Token format**: `{128-bit-random-id}.{HMAC-SHA256-signature}`
+- **HMAC key**: 256-bit, generated from `crypto/rand` at server startup (ephemeral)
+- **Client fingerprint**: `SHA-256(client_ip | User-Agent)` — baked into the HMAC
+- **Verification**: every file/zip request re-derives the fingerprint from the
+  requesting client and validates the HMAC; mismatches return 403 Forbidden
+- **Auto-expiry**: sessions are deleted after 10 minutes
+
+To access a converted file, an attacker would need the 128-bit random session ID
+**+** the 256-bit HMAC server key **+** the victim's IP address **+** the victim's
+exact User-Agent string — all within the 10-minute TTL.
 
 ## Free & Open Source
 
