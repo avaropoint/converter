@@ -42,6 +42,10 @@ func main() {
 	switch cmd {
 	case "help", "-h", "--help":
 		usage()
+	case "version", "-v", "--version":
+		fmt.Println(version)
+	case "healthcheck":
+		cmdHealthcheck(args)
 	case "view":
 		requireFile(args)
 		cmdView(args[0])

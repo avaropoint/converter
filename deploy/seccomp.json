@@ -1,0 +1,64 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "comment": "Minimal seccomp profile for the converter Go binary. Only the syscalls required by Go's runtime, net/http, and crypto/rand are permitted. Everything else is denied with EPERM.",
+  "syscalls": [
+    {
+      "comment": "Memory management",
+      "names": ["mmap", "munmap", "mprotect", "madvise", "brk"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Process and thread management (Go runtime scheduler)",
+      "names": [
+        "clone", "clone3", "futex", "sched_yield", "nanosleep",
+        "clock_nanosleep", "gettid", "getpid", "getuid", "geteuid",
+        "getgid", "getegid", "set_tid_address", "set_robust_list",
+        "rseq", "exit", "exit_group", "rt_sigaction", "rt_sigprocmask",
+        "rt_sigreturn", "sigaltstack", "tgkill"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "File descriptors (stdin/stdout/stderr, epoll, pipes)",
+      "names": [
+        "read", "write", "close", "fcntl", "dup", "dup2", "dup3",
+        "pipe", "pipe2", "epoll_create1", "epoll_ctl", "epoll_pwait",
+        "epoll_pwait2", "eventfd", "eventfd2"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Networking (TCP listen, accept, connect for HTTP + SSRF-safe dialer)",
+      "names": [
+        "socket", "bind", "listen", "accept", "accept4",
+        "connect", "getsockname", "getpeername",
+        "setsockopt", "getsockopt", "shutdown",
+        "sendto", "recvfrom", "sendmsg", "recvmsg"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "File system (read-only for /etc/ssl/certs, /proc/self, embed.FS)",
+      "names": [
+        "openat", "fstat", "newfstatat", "statx",
+        "lseek", "readlinkat", "getrandom"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Time (rate limiter, session expiry, HTTP timeouts)",
+      "names": ["clock_gettime", "clock_getres", "gettimeofday"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Arch-specific (Go runtime on amd64/arm64)",
+      "names": ["arch_prctl", "prctl"],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Memory-mapped I/O (Go allocator)",
+      "names": ["mincore"],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}

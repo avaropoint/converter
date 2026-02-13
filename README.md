@@ -39,18 +39,23 @@ go install github.com/avaropoint/converter/cmd/converter@latest
 Pre-built binaries for Linux, macOS, and Windows are available on the
 [Releases](https://github.com/avaropoint/converter/releases) page.
 
-### Docker
+### Docker (Hardened Sandbox)
+
+The Docker image uses a `scratch` base (zero OS) with a custom seccomp profile,
+memory/CPU/PID limits, read-only filesystem, and all capabilities dropped.
 
 ```bash
 docker pull ghcr.io/avaropoint/converter:latest
 docker run -p 8080:8080 ghcr.io/avaropoint/converter:latest
 ```
 
-Or with Docker Compose:
+For full sandbox hardening (recommended for production):
 
 ```bash
 docker compose up
 ```
+
+See [SECURITY.md](SECURITY.md) for the complete list of container security controls.
 
 ## Usage
 
@@ -179,15 +184,20 @@ Key protections:
 | Slowloris / connection exhaustion | Read/Write/Idle timeouts + graceful shutdown |
 | Clickjacking | `X-Frame-Options: DENY` + `frame-ancestors 'none'` |
 | MIME sniffing | `X-Content-Type-Options: nosniff` |
+| DDoS / resource exhaustion | Memory (256 MB), CPU (1 core), PID (64), fd (4096) limits |
+| Container escape | scratch image, zero capabilities, seccomp whitelist, read-only fs |
+| Fork bomb | PID limit of 64 processes |
+| OOM host impact | Hard memory cap prevents host RAM exhaustion |
 
 ### Production Deployment
 
-For internet-facing deployments, we recommend placing Converter behind a reverse
+The `docker compose up` command applies the full hardened sandbox automatically.
+For internet-facing deployments, additionally place Converter behind a reverse
 proxy (nginx, Caddy) that provides:
 
 - TLS termination
 - Authentication
-- Rate limiting
+- Additional rate limiting
 - Access logging
 
 ## Free & Open Source

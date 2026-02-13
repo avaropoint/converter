@@ -1,6 +1,21 @@
-# Converter supports multi-arch builds. Build with:
+# Hyper-secure deployment.
+#
+# Build & run:
 #   docker compose build
 #   docker compose up
+#
+# This runs the converter in a hardened sandbox with:
+#   - scratch base image          (zero OS, zero shell, zero tools)
+#   - non-root user               (UID 65534/nobody)
+#   - read-only filesystem        (no writes anywhere)
+#   - all capabilities dropped    (no raw sockets, no mount, no ptrace)
+#   - no-new-privileges           (blocks SUID/SGID escalation)
+#   - custom seccomp profile      (whitelists ~40 syscalls, denies everything else)
+#   - memory cap at 256 MB        (prevents OOM from consuming host RAM)
+#   - CPU cap at 1.0 core         (prevents CPU exhaustion of host)
+#   - PID limit at 64             (prevents fork bombs)
+#   - file descriptor limit       (prevents fd exhaustion)
+#   - ephemeral /tmp in RAM       (nothing persists)
 
 services:
   converter:
@@ -8,10 +23,37 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+    # --- Filesystem isolation ---
     read_only: true
+    tmpfs:
+      - /tmp:size=16M,noexec,nosuid,nodev
+
+    # --- Privilege isolation ---
     security_opt:
       - no-new-privileges:true
+      - seccomp=deploy/seccomp.json
     cap_drop:
       - ALL
-    tmpfs:
-      - /tmp
+
+    # --- Resource limits (DDoS / OOM protection) ---
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+    pids_limit: 64
+    ulimits:
+      nofile:
+        soft: 1024
+        hard: 4096
+
+    # --- Logging ---
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

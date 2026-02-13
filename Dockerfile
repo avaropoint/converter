@@ -7,19 +7,23 @@ COPY . .
 
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /converter ./cmd/converter
 
-# Runtime stage
-FROM alpine:3.20
+# Runtime stage — scratch: zero OS, zero shell, zero attack surface.
+# The only thing in this image is the statically-linked converter binary.
+FROM scratch
 
-RUN addgroup -S converter && adduser -S converter -G converter
+# Import CA certificates so HTTPS (external image inlining) works.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-COPY --from=builder /converter /usr/local/bin/converter
+# Run as non-root (UID 65534 = nobody).
+USER 65534:65534
 
-USER converter
+COPY --from=builder /converter /converter
 
 EXPOSE 8080
 
+# Healthcheck uses the binary itself — no wget/curl needed.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost:8080/api/info || exit 1
+  CMD ["/converter", "healthcheck"]
 
-ENTRYPOINT ["converter"]
+ENTRYPOINT ["/converter"]
 CMD ["serve", "8080"]
