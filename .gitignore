@@ -17,5 +17,8 @@ Thumbs.db
 *.swo
 *~
 
+# No data files should be committed
+data/
+
 # Go build cache (usually outside repo, but just in case)
 vendor/

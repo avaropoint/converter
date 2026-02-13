@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Converter</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="brand">
+  <div class="brand-icon">
+    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><polyline points="14 2 14 8 20 8"/><path d="m9 15 2 2 4-4"/></svg>
+  </div>
+  <h1>Converter</h1>
+</div>
+<p class="subtitle">Drop a file to convert and extract its contents</p>
+
+<div class="container">
+  <div class="dropzone" id="dropzone">
+    <div class="dropzone-graphic">
+      <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    </div>
+    <p class="dropzone-text">Drop your file here</p>
+    <p class="dropzone-hint">or <span class="browse" id="browseBtn">browse to select</span></p>
+    <input type="file" id="fileInput">
+  </div>
+
+  <div style="text-align:center">
+    <div class="formats-badge">
+      Supported <span class="tag">winmail.dat</span> <span class="tag">TNEF</span>
+    </div>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="results" id="results" style="display:none">
+    <div class="results-header">
+      <h2>Extracted <span class="file-count" id="fileCount">0</span></h2>
+      <a class="download-all" id="downloadAll" href="#">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download All
+      </a>
+    </div>
+    <ul class="file-list" id="fileList"></ul>
+  </div>
+
+  <button class="reset-btn" id="resetBtn">Convert another file</button>
+</div>
+
+<footer>
+  <span id="versionLabel">converter</span>
+  <span class="dot"></span>
+  <span>Files are processed in memory and auto-deleted after 10 min</span>
+</footer>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

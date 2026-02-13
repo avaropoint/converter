@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/avaropoint/converter/formats"
+	"github.com/avaropoint/converter/web"
 )
 
 // session holds the extracted files for a single conversion.
@@ -84,10 +86,16 @@ func cmdServe(port string) {
 	store := newSessionStore()
 	mux := http.NewServeMux()
 
+	// Serve the main page from embedded static files.
 	mux.HandleFunc("/", handleIndex)
+	mux.HandleFunc("/api/info", handleInfo)
 	mux.HandleFunc("/api/convert", handleConvert(store))
 	mux.HandleFunc("/api/files/", handleFile(store))
 	mux.HandleFunc("/api/zip/", handleZip(store))
+
+	// Serve embedded static assets (CSS, JS) under /static/.
+	staticContent, _ := fs.Sub(web.StaticFS, "static")
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticContent))))
 
 	addr := ":" + port
 	fmt.Printf("converter v%s web interface\n", version)
@@ -113,8 +121,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'")
-	w.Write([]byte(indexHTML))
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+	data, _ := web.StaticFS.ReadFile("static/index.html")
+	w.Write(data)
+}
+
+// handleInfo returns the server version as JSON.
+func handleInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
 // convertResponse is the JSON returned after a successful conversion.
