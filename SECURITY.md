@@ -24,16 +24,35 @@ Converter is a file parsing and extraction tool. Its security posture:
 
 ### What We Protect Against
 
-- **XSS in extracted HTML**: All extracted HTML is served with a strict
-  Content-Security-Policy (`default-src 'none'`) that blocks script execution
-- **SSRF via image inlining**: External image fetching blocks private, loopback,
-  link-local, and cloud metadata IP ranges
+- **XSS in extracted HTML**: Extracted HTML files are served with a strict
+  Content-Security-Policy (`default-src 'none'; style-src 'unsafe-inline'; img-src data:`)
+  that blocks all script execution. The main web UI page uses
+  `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:`
+  — no inline scripts or styles are permitted.
+- **Static asset integrity**: Web UI assets (HTML, CSS, JS) are compiled into
+  the binary via `go:embed` — no filesystem access is needed at runtime, and
+  the assets cannot be tampered with after build.
+- **SSRF via image inlining**: External image fetching uses a custom dialer that
+  validates resolved IP addresses before connecting, preventing DNS rebinding
+  attacks. Private, loopback, link-local, and cloud metadata IP ranges are
+  blocked. Redirects are validated at each hop.
+- **Rate limiting**: Upload endpoint (`/api/convert`) is rate-limited to prevent
+  resource exhaustion from concurrent CPU/memory-intensive conversions.
 - **Header injection**: Filenames from converted files are sanitized to remove
-  control characters before use in HTTP headers
-- **Upload abuse**: 50 MB upload limit enforced via `MaxBytesReader`
-- **Session enumeration**: 128-bit cryptographically random session IDs
-- **Clickjacking**: `X-Frame-Options: DENY` and `frame-ancestors 'none'`
-- **MIME sniffing**: `X-Content-Type-Options: nosniff` on all responses
+  control characters and path separators before use in HTTP headers.
+- **Upload abuse**: 50 MB upload limit enforced via `MaxBytesReader`.
+- **Session enumeration**: 128-bit cryptographically random session IDs.
+- **Clickjacking**: `X-Frame-Options: DENY` and `frame-ancestors 'none'`.
+- **MIME sniffing**: `X-Content-Type-Options: nosniff` on all responses.
+- **Referrer leakage**: `Referrer-Policy: no-referrer` on all responses.
+- **Device access**: `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+  prevents access to sensitive device APIs.
+- **Path traversal**: Filenames from untrusted sources are sanitized and validated
+  to ensure writes stay within the intended output directory.
+- **Memory safety**: Parser allocations are bounded to prevent crafted files from
+  causing out-of-memory crashes.
+- **Graceful shutdown**: The server handles SIGINT/SIGTERM for clean connection
+  draining.
 
 ### What Is Out of Scope
 

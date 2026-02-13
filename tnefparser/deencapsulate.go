@@ -20,6 +20,7 @@ func DeencapsulateHTML(rtf []byte) []byte {
 	}
 
 	var out bytes.Buffer
+	out.Grow(len(rtf)) // Pre-allocate — output is typically smaller than input.
 	n := len(rtf)
 	i := 0
 	inHtmlRtf := false // true inside \htmlrtf ... \htmlrtf0 regions

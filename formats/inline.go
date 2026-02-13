@@ -1,7 +1,9 @@
 package formats
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -13,8 +15,79 @@ import (
 
 var imgSrcRe = regexp.MustCompile(`(<img\b[^>]*?\bsrc=")([^"]+)(")`)
 
+// ssrfSafeDialer returns a DialContext that resolves DNS and checks every
+// resolved IP against the private/loopback/link-local blocklist BEFORE
+// connecting.  This eliminates the DNS rebinding TOCTOU race that exists
+// when isPrivateHost() and the actual connection resolve independently.
+func ssrfSafeDialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	resolver := &net.Resolver{}
+
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		// Block obviously dangerous hostnames before any DNS lookup.
+		if isBlockedHostname(host) {
+			return nil, errors.New("blocked host")
+		}
+
+		// Resolve with a tight timeout to prevent hanging on unresolvable hosts.
+		resolveCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
+		ips, err := resolver.LookupIPAddr(resolveCtx, host)
+		if err != nil {
+			return nil, err
+		}
+
+		// Check ALL resolved IPs -- block if any are private.
+		for _, ip := range ips {
+			if isBlockedIP(ip.IP) {
+				return nil, errors.New("blocked IP")
+			}
+		}
+
+		// Connect to the resolved IP directly (bypasses further DNS).
+		// Try each resolved address until one succeeds.
+		for _, ip := range ips {
+			target := net.JoinHostPort(ip.IP.String(), port)
+			conn, err := dialer.DialContext(ctx, network, target)
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, errors.New("all addresses failed")
+	}
+}
+
+// inlineClient uses a custom transport with an SSRF-safe dialer that
+// validates resolved IPs before connecting.
 var inlineClient = &http.Client{
-	Timeout: 5 * time.Second,
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext:           ssrfSafeDialer(),
+		TLSHandshakeTimeout:  5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       30 * time.Second,
+	},
+	// Validate each redirect target against the SSRF blocklist.
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		host := req.URL.Hostname()
+		if isBlockedHostname(host) {
+			return errors.New("redirect to blocked host")
+		}
+		// The custom dialer will also check the resolved IP, so even if
+		// the hostname looks benign, a private IP will still be blocked.
+		return nil
+	},
 }
 
 // InlineExternalImages finds all <img src="https://..."> references in html,
@@ -33,29 +106,27 @@ func InlineExternalImages(html []byte, cache map[string]string) []byte {
 			return match
 		}
 		prefix := parts[1] // <img ... src="
-		url := string(parts[2])
+		rawURL := string(parts[2])
 		suffix := parts[3] // "
 
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
 			return match
 		}
 
-		// Already a data URI
-		if strings.HasPrefix(url, "data:") {
+		if strings.HasPrefix(rawURL, "data:") {
 			return match
 		}
 
-		// Check cache first
-		dataURI, seen := cache[url]
+		dataURI, seen := cache[rawURL]
 		if !seen {
-			data, contentType, err := fetchImage(url)
+			data, contentType, err := fetchImage(rawURL)
 			if err != nil || len(data) == 0 {
-				cache[url] = ""
+				cache[rawURL] = ""
 			} else {
 				mime := imageContentType(contentType)
 				b64 := base64.StdEncoding.EncodeToString(data)
 				dataURI = "data:" + mime + ";base64," + b64
-				cache[url] = dataURI
+				cache[rawURL] = dataURI
 			}
 		}
 
@@ -72,13 +143,17 @@ func InlineExternalImages(html []byte, cache map[string]string) []byte {
 }
 
 func fetchImage(rawURL string) ([]byte, string, error) {
-	// SSRF protection: block private, loopback, and link-local IPs.
+	// Basic URL validation.
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", err
 	}
-	host := parsed.Hostname()
-	if isPrivateHost(host) {
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "", nil
+	}
+
+	// Hostname pre-check (the dialer also checks resolved IPs).
+	if isBlockedHostname(parsed.Hostname()) {
 		return nil, "", nil
 	}
 
@@ -97,7 +172,7 @@ func fetchImage(rawURL string) ([]byte, string, error) {
 		return nil, "", nil
 	}
 
-	// Limit to 5 MB per image
+	// Limit to 5 MB per image.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 	if err != nil {
 		return nil, "", err
@@ -105,30 +180,27 @@ func fetchImage(rawURL string) ([]byte, string, error) {
 	return data, ct, nil
 }
 
-// isPrivateHost returns true if the host resolves to a private, loopback,
-// or link-local address that should not be fetched (SSRF protection).
-func isPrivateHost(host string) bool {
-	// Block obvious names first.
+// isBlockedHostname returns true if the hostname should be blocked
+// without needing DNS resolution.
+func isBlockedHostname(host string) bool {
 	lower := strings.ToLower(host)
 	if lower == "localhost" || strings.HasSuffix(lower, ".local") ||
 		lower == "metadata.google.internal" ||
 		strings.HasSuffix(lower, ".internal") {
 		return true
 	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		// Can't resolve — block to be safe.
-		return true
-	}
-
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
+	// Also block if the host is a raw IP that is private.
+	if ip := net.ParseIP(host); ip != nil {
+		return isBlockedIP(ip)
 	}
 	return false
+}
+
+// isBlockedIP returns true if the IP address is in a range that should
+// not be fetched (private, loopback, link-local, unspecified).
+func isBlockedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 func imageContentType(ct string) string {

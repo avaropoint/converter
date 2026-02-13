@@ -2,7 +2,7 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -11,13 +11,21 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/avaropoint/converter/formats"
 	"github.com/avaropoint/converter/web"
 )
+
+// ---------------------------------------------------------------------------
+// Session management
+// ---------------------------------------------------------------------------
 
 // session holds the extracted files for a single conversion.
 type session struct {
@@ -37,10 +45,14 @@ type extractedFile struct {
 type sessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
+	done     chan struct{} // closed on shutdown to stop cleanup goroutine
 }
 
 func newSessionStore() *sessionStore {
-	s := &sessionStore{sessions: make(map[string]*session)}
+	s := &sessionStore{
+		sessions: make(map[string]*session),
+		done:     make(chan struct{}),
+	}
 	go s.cleanup()
 	return s
 }
@@ -61,47 +73,171 @@ func (s *sessionStore) get(id string) *session {
 
 // cleanup removes sessions older than 10 minutes.
 func (s *sessionStore) cleanup() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(time.Minute)
-		s.mu.Lock()
-		for id, sess := range s.sessions {
-			if time.Since(sess.created) > 10*time.Minute {
-				delete(s.sessions, id)
+		select {
+		case <-ticker.C:
+			s.mu.Lock()
+			for id, sess := range s.sessions {
+				if time.Since(sess.created) > 10*time.Minute {
+					delete(s.sessions, id)
+				}
 			}
+			s.mu.Unlock()
+		case <-s.done:
+			return
 		}
-		s.mu.Unlock()
 	}
 }
+
+// stop signals the cleanup goroutine to exit.
+func (s *sessionStore) stop() { close(s.done) }
+
+// ---------------------------------------------------------------------------
+// Rate limiter (stdlib-only token bucket)
+// ---------------------------------------------------------------------------
+
+// rateLimiter implements a simple token-bucket rate limiter.
+type rateLimiter struct {
+	tokens     int64 // current tokens (atomic)
+	maxTokens  int64
+	refillRate int64 // tokens added per second
+	done       chan struct{}
+}
+
+func newRateLimiter(maxTokens, refillRate int64) *rateLimiter {
+	rl := &rateLimiter{
+		tokens:     maxTokens,
+		maxTokens:  maxTokens,
+		refillRate: refillRate,
+		done:       make(chan struct{}),
+	}
+	go rl.refill()
+	return rl
+}
+
+func (rl *rateLimiter) refill() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			cur := atomic.LoadInt64(&rl.tokens)
+			next := cur + rl.refillRate
+			if next > rl.maxTokens {
+				next = rl.maxTokens
+			}
+			atomic.StoreInt64(&rl.tokens, next)
+		case <-rl.done:
+			return
+		}
+	}
+}
+
+// allow returns true if a token is available, consuming one.
+func (rl *rateLimiter) allow() bool {
+	for {
+		cur := atomic.LoadInt64(&rl.tokens)
+		if cur <= 0 {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&rl.tokens, cur, cur-1) {
+			return true
+		}
+	}
+}
+
+func (rl *rateLimiter) stop() { close(rl.done) }
+
+// ---------------------------------------------------------------------------
+// Crypto
+// ---------------------------------------------------------------------------
 
 func randomID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
+		// crypto/rand failure is unrecoverable -- log and exit cleanly
+		// rather than panicking inside an HTTP handler.
+		log.Fatalf("crypto/rand failed: %v", err)
 	}
 	return hex.EncodeToString(b)
 }
 
+// isHexString returns true if s contains only hex characters.
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
 // cmdServe starts the web interface on the given port.
 func cmdServe(port string) {
 	store := newSessionStore()
+	limiter := newRateLimiter(10, 2) // 10 burst, 2/sec refill
+
 	mux := http.NewServeMux()
 
 	// Serve the main page from embedded static files.
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/info", handleInfo)
-	mux.HandleFunc("/api/convert", handleConvert(store))
+	mux.HandleFunc("/api/convert", handleConvert(store, limiter))
 	mux.HandleFunc("/api/files/", handleFile(store))
 	mux.HandleFunc("/api/zip/", handleZip(store))
 
-	// Serve embedded static assets (CSS, JS) under /static/.
+	// Serve embedded static assets (CSS, JS) under /static/ with cache headers.
 	staticContent, _ := fs.Sub(web.StaticFS, "static")
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticContent))))
+	mux.Handle("/static/", cacheHeaders(
+		http.StripPrefix("/static/", http.FileServer(http.FS(staticContent))),
+	))
 
 	addr := ":" + port
-	fmt.Printf("converter v%s web interface\n", version)
-	fmt.Printf("Listening on http://localhost%s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, securityHeaders(mux)))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           securityHeaders(mux),
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+
+	// Graceful shutdown on SIGINT / SIGTERM.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		fmt.Printf("converter v%s web interface\n", version)
+		fmt.Printf("Listening on http://localhost%s\n", addr)
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-stop
+	fmt.Println("\nShutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("shutdown error: %v", err)
+	}
+	store.stop()
+	limiter.stop()
+	fmt.Println("Server stopped.")
 }
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
 
 // securityHeaders wraps a handler with common security headers.
 func securityHeaders(next http.Handler) http.Handler {
@@ -110,9 +246,22 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("X-DNS-Prefetch-Control", "off")
 		next.ServeHTTP(w, r)
 	})
 }
+
+// cacheHeaders adds long-lived cache headers for immutable embedded assets.
+func cacheHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
 
 // handleIndex serves the embedded HTML page.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -122,14 +271,21 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
-	data, _ := web.StaticFS.ReadFile("static/index.html")
+		"default-src 'self'; script-src 'self'; style-src 'self'; "+
+			"img-src 'self' data:; base-uri 'self'; form-action 'self'; "+
+			"object-src 'none'; frame-ancestors 'none'")
+	data, err := web.StaticFS.ReadFile("static/index.html")
+	if err != nil {
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
 	w.Write(data)
 }
 
 // handleInfo returns the server version as JSON.
 func handleInfo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]string{"version": version})
 }
 
@@ -140,10 +296,17 @@ type convertResponse struct {
 }
 
 // handleConvert processes an uploaded file, auto-detecting its format.
-func handleConvert(store *sessionStore) http.HandlerFunc {
+func handleConvert(store *sessionStore, limiter *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Rate limit conversion requests.
+		if !limiter.allow() {
+			w.Header().Set("Retry-After", "1")
+			jsonError(w, "Too many requests -- try again shortly", http.StatusTooManyRequests)
 			return
 		}
 
@@ -211,6 +374,12 @@ func handleFile(store *sessionStore) http.HandlerFunc {
 		}
 		sid, name := parts[0], parts[1]
 
+		// Validate session ID format (must be 32 hex chars).
+		if len(sid) != 32 || !isHexString(sid) {
+			http.NotFound(w, r)
+			return
+		}
+
 		sess := store.get(sid)
 		if sess == nil {
 			jsonError(w, "Session expired or not found", http.StatusNotFound)
@@ -222,6 +391,7 @@ func handleFile(store *sessionStore) http.HandlerFunc {
 				ct := contentType(f.Name, f.Type)
 				w.Header().Set("Content-Type", ct)
 				w.Header().Set("Content-Disposition", safeDisposition(f.Name))
+				w.Header().Set("Cache-Control", "private, no-store")
 				// Extracted HTML may contain malicious scripts;
 				// block execution with a strict CSP.
 				if f.Type == "html" {
@@ -236,32 +406,45 @@ func handleFile(store *sessionStore) http.HandlerFunc {
 	}
 }
 
-// handleZip returns all extracted files as a zip archive.
+// handleZip streams all extracted files as a zip archive directly to the client.
 func handleZip(store *sessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sid := strings.TrimPrefix(r.URL.Path, "/api/zip/")
+
+		// Validate session ID format.
+		if len(sid) != 32 || !isHexString(sid) {
+			http.NotFound(w, r)
+			return
+		}
+
 		sess := store.get(sid)
 		if sess == nil {
 			jsonError(w, "Session expired or not found", http.StatusNotFound)
 			return
 		}
 
-		var buf bytes.Buffer
-		zw := zip.NewWriter(&buf)
+		// Set headers before streaming -- cannot change after first write.
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="converted_output.zip"`)
+
+		// Stream zip directly to the response writer (no buffering).
+		zw := zip.NewWriter(w)
 		for _, f := range sess.files {
 			fw, err := zw.Create(f.Name)
 			if err != nil {
-				continue
+				break
 			}
-			fw.Write(f.data)
+			if _, err := fw.Write(f.data); err != nil {
+				break
+			}
 		}
 		zw.Close()
-
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", `attachment; filename="converted_output.zip"`)
-		w.Write(buf.Bytes())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -333,7 +516,6 @@ func imageMIME(name string) string {
 // safeDisposition returns a Content-Disposition header value with the
 // filename sanitized to prevent header injection.
 func safeDisposition(name string) string {
-	// Remove control characters, quotes, and backslashes
 	safe := strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
 			return '_'

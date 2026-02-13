@@ -23,7 +23,8 @@ for adding new formats.
 - **CLI with multiple commands** — view, extract, body, dump, serve
 - **Zero external dependencies** — Go standard library only
 - **Single binary** — cross-platform, no runtime requirements
-- **Security hardened** — CSP headers, SSRF protection, filename sanitization
+- **Security hardened** — strict CSP, SSRF protection with DNS rebinding defense, rate limiting, filename sanitization
+- **Embedded web assets** — HTML, CSS, JS compiled into the binary via `go:embed`
 
 ## Quick Start
 
@@ -95,7 +96,9 @@ converter
 ├── cmd/inspect/         Low-level TNEF diagnostic tool
 ├── formats/             Converter interface + registry
 │   └── tnef/            TNEF format implementation
-└── tnefparser/          TNEF binary stream parser
+├── tnefparser/          TNEF binary stream parser
+└── web/                 Embedded static assets (go:embed)
+    └── static/          HTML, CSS, JS served by the web UI
 ```
 
 ### Pluggable Format System
@@ -140,7 +143,7 @@ import _ "github.com/avaropoint/converter/formats/myformat"
 
 ### Prerequisites
 
-- Go 1.23 or later
+- Go 1.25 or later
 
 ### Build & Test
 
@@ -168,12 +171,13 @@ Key protections:
 
 | Threat | Mitigation |
 |--------|-----------|
-| XSS in extracted HTML | Strict CSP blocks all script execution |
-| SSRF via image URLs | Private/loopback/link-local IPs blocked |
+| XSS in extracted HTML | Strict CSP: `'self'` for main page, `default-src 'none'` for extracted files |
+| SSRF via image URLs | DNS rebinding-safe custom dialer, redirect validation, private IP blocks |
 | Header injection | Control characters stripped from filenames |
-| Upload abuse | 50 MB limit via `MaxBytesReader` |
+| Upload abuse | 50 MB limit via `MaxBytesReader` + rate limiting |
 | Session enumeration | 128-bit `crypto/rand` session IDs |
-| Clickjacking | `X-Frame-Options: DENY` |
+| Slowloris / connection exhaustion | Read/Write/Idle timeouts + graceful shutdown |
+| Clickjacking | `X-Frame-Options: DENY` + `frame-ancestors 'none'` |
 | MIME sniffing | `X-Content-Type-Options: nosniff` |
 
 ### Production Deployment

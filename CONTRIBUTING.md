@@ -72,7 +72,26 @@ cd converter
 make build     # Build the binary
 make test      # Run tests
 make vet       # Run go vet
+make check     # Run all checks (vet + test + lint)
+make run       # Build and start web server
 ```
+
+### Customizing the Web UI
+
+The web interface lives in `web/static/` with separate HTML, CSS, and JS files:
+
+```
+web/
+├── embed.go              # go:embed directive — compiles assets into the binary
+└── static/
+    ├── index.html        # Main page markup
+    ├── css/style.css     # All styles (CSS variables for easy theming)
+    └── js/app.js         # Client-side logic (upload, results display)
+```
+
+Edit these files directly with full editor support (syntax highlighting, linting,
+formatting). After changes, rebuild with `make build` — the assets are compiled
+into the binary via `go:embed`.
 
 ## Monetization Policy
 

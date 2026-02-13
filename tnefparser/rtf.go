@@ -92,7 +92,14 @@ func decompressLZFu(input []byte, rawSize int) ([]byte, error) {
 	copy(dict, lzfuInitDict)
 	writePos := initDictLen
 
-	out := make([]byte, 0, rawSize)
+	// Cap output allocation to prevent OOM from crafted rawSize values.
+	// Limit to 64 MB — legitimate RTF bodies are much smaller.
+	const maxRawSize = 64 << 20
+	capSize := rawSize
+	if capSize > maxRawSize {
+		capSize = maxRawSize
+	}
+	out := make([]byte, 0, capSize)
 	inPos := 0
 
 	for inPos < len(input) {

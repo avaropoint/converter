@@ -8,6 +8,13 @@ func decodeMAPI(data []byte) []MAPIAttr {
 	}
 	count := int(binary.LittleEndian.Uint32(data[0:4]))
 	off := 4
+
+	// Cap pre-allocation to prevent OOM from crafted files.
+	// Each MAPI attr needs at least 8 bytes, so limit capacity accordingly.
+	maxAttrs := len(data) / 8
+	if count > maxAttrs {
+		count = maxAttrs
+	}
 	attrs := make([]MAPIAttr, 0, count)
 
 	for i := 0; i < count && off+4 <= len(data); i++ {
